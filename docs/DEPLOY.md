@@ -30,7 +30,7 @@ ssh root@<路由器IP> '
 
 看到 `TPROXY_OK` 才能继续。若报 `No such file`：尝试 `opkg install kmod-ipt-tproxy iptables-mod-tproxy`。
 
-⚠️ **OpenWrt 22.03+（fw4/nftables）机器本套件不适用**：iptables 规则可能通过兼容层部分生效，但无法保证，请改用 nftables 系方案（nikkinikki/OpenClash）。
+⚠️ **OpenWrt 22.03+（fw4/nftables）机器本套件不适用**：iptables 规则可能通过兼容层部分生效，但无法保证。请改用 nftables 系方案：24.10+ 推荐 homeproxy（同为 sing-box 内核，本套件的 sing-box.json 可直接复用）或 Nikki；过渡期固件用 OpenClash/PassWall2（见 COMPARISON.md 第 3 节）。
 
 ### 0.3 mangle 表冲突检查
 

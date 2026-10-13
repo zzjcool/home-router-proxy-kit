@@ -13,7 +13,7 @@
    `POSTMORTEMS.md` 的事故教训（违反其中的禁令会造成全屋断网）。
 2. **前置检查**（DEPLOY.md 第 0 节）：fw3+iptables、TPROXY 实测 OK、
    mangle/table 100/mark 1 空闲、内存 ≥256MB。
-   ⚠️ fw4/nftables 机器：本套件不适用，告知用户改选 nikkinikki/OpenClash，停止。
+   ⚠️ fw4/nftables 机器：本套件不适用。告知用户改选：24.10+ 用 homeproxy（同 sing-box 内核）/ Nikki，过渡期用 OpenClash/PassWall2（详见 COMPARISON.md 第 3 节），然后停止。
 3. **收集用户信息**（一次性问全，不要挤牙膏）：
    - 代理服务器：地址/端口/协议/密码/SNI（anytls/vmess/vless/trojan…均可）
    - 路由器 SSH 是否已配好免密（`ssh root@<IP> true` 试一下）

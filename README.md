@@ -64,7 +64,7 @@ home-router-proxy-kit/
 2. **硬件适配检查**：目标路由器须满足 `docs/DEPLOY.md` 第 0 节的前置条件
    （fw3+iptables、`xt_TPROXY` 可用、aarch64/x86_64、内存 ≥256MB）。
    ⚠️ 如果路由器是 fw4+nftables（OpenWrt 22.03+），本套件的 iptables 方案
-   **不适用**，请改用 nikkinikki / OpenClash 等 nftables 方案。
+   **不适用**。24.10+ 改用 homeproxy（同 sing-box 内核）/ Nikki，过渡期固件用 OpenClash/PassWall2（详见 docs/COMPARISON.md 第 3 节）。
 3. **让用户提供**：代理服务器地址/端口/密码/SNI（anytls 或其他 sing-box 支持的协议均可，
    把 `files/sing-box.json` 里的 PROXY outbound 改成用户自己的协议即可），
    以及一台可灰度验证的设备 IP。
@@ -95,11 +95,11 @@ home-router-proxy-kit/
 
 ## 与常见方案的区别
 
-选型对比（sing-box vs mihomo/xray vs OpenClash/Nikki vs TUN、何时不该用本套件）
+选型对比（sing-box vs mihomo/xray vs OpenWrt 插件生态 vs TUN、何时不该用本套件）
 详见 **`docs/COMPARISON.md`**。速览：
 | 方案 | 状态 |
 |---|---|
 | 本套件（sing-box + iptables TPROXY） | fw3/iptables 机器上的生产验证方案 |
-| OpenClash / PassWall2 | 为 fw4/nftables 设计，且官方源无包时不可用 |
+| OpenClash / PassWall2 / homeproxy / Nikki | 为 fw4/nftables 的现代固件设计；老 21.02/fw3 机器上官方源无包或依赖不满足（详见 COMPARISON） |
 | sing-box TUN auto_route | ⚠️ 事故根源，本套件明确弃用（见 POSTMORTEMS） |
 | dnsmasq+ipset DNS 分流 | 只能防 DNS 污染，做不了完整代理，可作补充 |

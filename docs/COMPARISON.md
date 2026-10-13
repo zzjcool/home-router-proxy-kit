@@ -8,7 +8,8 @@
 | 你的情况 | 建议 |
 |---|---|
 | GL.iNet/老 OpenWrt（21.02、fw3+iptables），官方源无代理插件 | **本套件**（就是为这种环境做的） |
-| 标准 OpenWrt 23.05+，想要图形界面点鼠标配置 | OpenClash / Nikki / homeproxy |
+| OpenWrt 24.10+（fw4），想要图形界面点鼠标配置 | homeproxy（sing-box 内核）/ OpenClash / Nikki / PassWall2 |
+| OpenWrt 22.03~23.05（fw4 过渡期） | OpenClash / PassWall2 / SSR Plus+（三家保留 iptables 路径） |
 | 有一台 x86 小盒子专门当路由 | 软路由系统（iKuai/OpenWrt）+ 任意成熟插件 |
 | 不想动路由器，就几台设备要上网 | 每设备装 sing-box/clash 客户端 |
 | 企业/多人场景要审计、策略、零配置分发 | 商业方案或自建网关，别自己攒 |
@@ -24,7 +25,7 @@
 | 透明代理 | TPROXY + TUN 两种，粒度可控 | TUN 为主，TPROXY 靠外部脚本 | TPROXY 需自己写全部 iptables | 同左 |
 | 单二进制部署 | ✅ musl 静态版，无依赖 | ✅ | ✅ | ✅ |
 | Clash API 兼容 | ✅ 自带（可用 yacd/metacubexd 全家面板） | ✅ 原生 | ❌ | ❌ |
-| 内存占用（10 个规则集，实测） | **56~81MB RSS** | 大规则集时常见 150MB+ | 视配置 | 低但功能少 |
+| 内存占用（10 个规则集，实测） | **56~81MB RSS**（本环境实测） | 无官方数字：个案从 20MB 空载到 256MB 设备 OOM 都有报告，取决于规则集/连接数 | 视配置 | 低但功能少 |
 | 配置可编程性 | JSON → **jq 原子修改 + schema 校验**（本套件 sb add-rule 的基础） | yaml，手改易错 | json，校验弱 | - |
 | 维护活跃度 | SagerNet 官方，活跃 | MetaCubeX，活跃 | XTLS，活跃 | 各分支 |
 
@@ -51,18 +52,35 @@
 
 ## 3. OpenWrt 插件生态对比（同为路由器形态）
 
-| 方案 | 适用固件 | 界面 | 特点 vs 本套件 |
-|---|---|---|---|
-| OpenClash | 23.05+/fw4 | LuCI 完整界面 | 新手友好、生态大；但规则集大时内存吃紧，行为黑盒程度高，回滚粒度粗 |
-| PassWall2 | 23.05+/fw4 | LuCI | 多内核拼装（xray/ss/tuic 各来一份），接缝多；老牌 |
-| Nikki / homeproxy | 23.05+/fw4 | LuCI | **sing-box 内核**，是 fw4 时代的"官方路线"；本套件可视为它的 fw3/iptables 前身 + CLI 化 |
-| ShadowSocksR Plus+ | fw3/fw4 | LuCI | 老内核，协议旧 |
-| **本套件（sing-box+TPROXY）** | fw3+iptables（21.02 时代、GL 4.x） | CLI（sb） | 老固件唯一解；灰度/自证回滚/事故文档化；无 LuCI |
+先说结论：**这几款都不是 OpenWrt 上游自带包**，全部来自第三方 feed，各家对防火墙层的要求差异很大。以下信息均核对于各项目 2026-10 的 README/Makefile/Release（出处列在表后）。
 
-**关键事实**：Nikki 系需要 `kmod-nft-tproxy`+fw4。GL-MT3600BE 这类 21.02/fw3 机器内核
-没有 nft_tproxy 模块、官方源也没有任何代理插件——**本套件是这类机器从 0 到 1 的唯一路径**。
-而如果你的机器是 fw4，装 Nikki 界面化操作确实更省事，本套件的 sing-box.json 可直接复用
-（内核配置无差别，只是劫持层从 iptables 换成 nftables）。
+| 方案 | 仓库 | 内核 | 防火墙要求 | 维护状态（2026-10） | 特点 vs 本套件 |
+|---|---|---|---|---|---|
+| OpenClash | vernesong/OpenClash | mihomo（原 Clash Meta） | fw3(iptables) 和 fw4(nftables) **双支持**，18.06+ | 活跃（v0.48.002, 2026-10-12） | LuCI 完整界面、生态最大；行为黑盒程度高，回滚粒度粗 |
+| PassWall2 | Openwrt-Passwall/openwrt-passwall2 | Xray 或 sing-box 三选一/All | 无 fw4 时默认 iptables，有则 nftables；README 要求 21.02+、≥256MB RAM | 活跃（26.10.1） | 多内核可选；与一代差别在把内核收成 Basic Core 选项、分流/负载均衡强化 |
+| SSR Plus+ | fw876/helloworld | xray/mihomo/ssr 等多选（按架构默认不同） | 同上双支持；老 21.02 编译需自行升 Go 1.21+ | 活跃（v196.19, 2026-10-07） | 老牌；内核生态杂，适合已有存量配置的人 |
+| homeproxy | immortalwrt/homeproxy | **sing-box** | **仅 fw4**（依赖 kmod-nft-tproxy），issue 模板要求 ≥24.10 | 活跃；ImmortalWrt 官方 luci 源内置 | **同内核的 LuCI 界面版**——与本套件的 sing-box.json 理念一致，只是劫持层是 nftables |
+| Nikki | nikkinikki-org/OpenWrt-nikki | **mihomo**（前身 luci-app-mihomo，因许可证改名） | **仅 fw4**，要求 OpenWrt ≥24.10、内核 ≥5.13 | 活跃（v1.26.2, 2026-10-10），自建 feed | mihomo 界面化标杆；与本套件不同内核 |
+| **本套件** | zzjcool/home-router-proxy-kit | **sing-box** | **仅 fw3+iptables**（需要 xt_TPROXY） | 本文档所在仓库 | 老固件唯一解；CLI、灰度/自证回滚/事故文档化 |
+
+**对老 21.02/fw3 机器的意义**：GL-MT3600BE 这类机器内核没编译 nft_tproxy 模块、
+GL 官方源也没有任何代理插件，GL 官方论坛也明确警告不要直接装其他版本的包（可能变砖）。
+文档上仍保留 iptables 路径的 OpenClash/PassWall2/SSR Plus+ 能不能在特定 GL 定制机上装上，
+要按型号核依赖（官方源没有依赖包时基本无解）——而本套件是静态二进制 + 自带规则集 +
+自带劫持脚本，**零依赖整包交付**，这也是它存在的理由。
+
+而如果你的机器是 fw4（24.10+），装 homeproxy（同 sing-box 内核）界面化操作更省事，
+本套件的 sing-box.json 可直接复用（内核配置无差别，只是劫持层从 iptables 换成 nftables）。
+
+出处：
+
+- OpenClash：<https://github.com/vernesong/OpenClash>（README 双路径安装命令；v0.48.002 Release）
+- PassWall2：<https://github.com/Openwrt-Passwall/openwrt-passwall2>（README/Makefile；原 xiaorouji 仓库已迁移）
+- SSR Plus+：<https://github.com/fw876/helloworld>（dev 分支 Makefile；v196.19）
+- homeproxy：<https://github.com/immortalwrt/homeproxy>（Makefile 依赖 `+sing-box +firewall4 +kmod-nft-tproxy`）
+- Nikki：<https://github.com/nikkinikki-org/OpenWrt-nikki>（README：mihomo + fw4 + ≥24.10；改名史见 v1.17.4...v1.17.5）
+- OpenWrt/ImmortalWrt 官方源抽查（25.12.x）：上游 luci 源无任何上述插件；ImmortalWrt 源含 homeproxy/OpenClash/PassWall，无 nikki/luci-app-mihomo
+- GL 固件版本表：<https://www.gl-inet.com/pages/firmware-versions>（4.x 并非单一 OpenWrt 基线，多数机型仍是 21.02）
 
 ## 4. TPROXY vs TUN（sing-box 自己的两种透明代理模式）
 
