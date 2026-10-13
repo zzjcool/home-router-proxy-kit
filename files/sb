@@ -1,0 +1,472 @@
+#!/bin/sh
+# sb — sing-box 路由器透明代理 一站式运维工具
+# 适配: GL.iNet GL-MT3600BE / OpenWrt 21.02 (busybox ash, 无 bash)
+#
+# 用法: sb <命令> [参数]        (Tab 补全见 /etc/bash_completion.d/ 或本文件尾部说明)
+#       sb help [主题]          主题: usage | debug | recipe | all
+#
+# ══════════════════════════════════════════════════════════════════
+# 设计背景(写给未来的 Agent / 维护者)
+# ══════════════════════════════════════════════════════════════════
+# 本路由器用 sing-box TPROXY 做全局智能分流:
+#   LAN 设备流量 --(iptables mangle TPROXY :7895, mark=1, table=100)--> sing-box
+#   分流语义: geosite-cn/geoip-cn→direct; 境外域名→old; AI→sg; 视频→hk2; 漏网→direct(策略A)
+# 事故史(务必读, 避免重蹈):
+#   1. 曾用 tun+auto_route 测试导致全屋断网 — auto_route 的
+#      "from all lookup 2022" 会劫持转发+本机全部流量。因此本方案
+#      只用 iptables TPROXY 且只挂 br-lan, 绝不用 sing-box 的 auto_route。
+#   2. 曾加 "UDP 3478/7844→direct" 豁免 Tailscale, 结果误伤: Tailscale
+#      DERP 借用 facebook/googlevideo 等域名+7844 端口, 这些域名需走
+#      代理才通。教训: 不要按端口豁免(端口会被复用), 按域名/规则集豁免。
+#   3. Telegram 客户端直接连 IP(无DNS), 域名规则抓不到 → 落到 final:direct
+#      被墙。已加 geoip-telegram。同类问题按 help debug 的 SOP 处理。
+# ══════════════════════════════════════════════════════════════════
+
+CONF="/etc/sing-box/config.json"
+BASE="/etc/sing-box"
+RULES_DIR="$BASE/rules"
+LOG="/var/log/sing-box.log"
+SB_BIN="/usr/bin/sing-box"
+TPROXY="$BASE/sb-tproxy"
+API="http://127.0.0.1:9090"
+SECRET=""  # 如启用了 clash_api secret, 在此填写
+MIRROR="https://gh-proxy.com/https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo"
+
+# 颜色 (busybox ash 兼容)
+C1='\033[1;36m'; C2='\033[1;32m'; C3='\033[1;33m'; C4='\033[1;31m'; C0='\033[0m'
+say()  { printf "${C1}==>${C0} %s\n" "$*"; }
+ok()   { printf "${C2} ✓${C0} %s\n" "$*"; }
+warn() { printf "${C3} !${C0} %s\n" "$*"; }
+err()  { printf "${C4} ✗${C0} %s\n" "$*" >&2; }
+
+# ─────────────────────────── 基础状态 ───────────────────────────
+
+cmd_status() {
+	printf "${C1}═══ sing-box 透明代理状态 ═══${C0}\n"
+	# 进程
+	if pidof sing-box >/dev/null; then
+		mem=$(awk '/VmRSS/{print int($2/1024)}' /proc/$(pidof sing-box)/status 2>/dev/null)
+		ok "sing-box 运行中 (PID $(pidof sing-box), RSS ${mem:-?}MB)"
+	else
+		err "sing-box 未运行"
+	fi
+	# 规则
+	if iptables -t mangle -S PREROUTING 2>/dev/null | grep -q "SB_TPROXY"; then
+		n=$(iptables -t mangle -L PREROUTING -v -n 2>/dev/null | grep SB_TPROXY | awk '{print $1}')
+		ok "TPROXY 规则已挂载 (命中 ${n:-0} 包)"
+		if [ -s "$BASE/tproxy.src" ]; then
+			warn "灰度模式(仅代理): $(grep -vE '^\s*(#|$)' $BASE/tproxy.src | tr '\n' ' ')"
+		else
+			printf "   代理范围: 整个 br-lan\n"
+		fi
+	else
+		warn "TPROXY 规则未挂载 (流量全部直连)"
+	fi
+	# 出站分布(近200行日志)
+	if [ -f "$LOG" ]; then
+		printf "   出站分布(近期): "
+		tail -200 "$LOG" | grep -oE 'outbound/[a-z]+\[[A-Za-z]+\]' | sort | uniq -c | sort -rn | sed 's/outbound\///' | tr '\n' ' '; printf "\n"
+		ec=$(tail -100 "$LOG" | grep -c ERROR)
+		[ "$ec" -gt 0 ] && warn "近100行日志有 ${ec} 条 ERROR (sb log 可查看)" || ok "近期日志无错误"
+	fi
+	# 内存/负载
+	printf "   内存可用: $(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)MB   负载: $(cut -d' ' -f1-3 /proc/loadavg)\n"
+}
+
+# ─────────────────────────── 启停/回滚 ───────────────────────────
+
+cmd_on() {
+	say "启动透明代理"
+	/etc/init.d/sing-box enabled || /etc/init.d/sing-box enable
+	/etc/init.d/sing-box start 2>/dev/null
+	sleep 1
+	pidof sing-box >/dev/null || { err "sing-box 启动失败, 查日志: sb log"; exit 1; }
+	"$TPROXY" start
+}
+
+cmd_off() {
+	say "回滚: 移除 TPROXY 规则 (全屋恢复直连, sing-box 继续运行)"
+	"$TPROXY" stop
+	say "如需连 sing-box 一起停: /etc/init.d/sing-box stop"
+}
+
+cmd_restart() {
+	say "重启 sing-box (重放配置)"
+	if ! "$SB_BIN" check -c "$CONF" 2>&1; then err "配置校验失败, 已拒绝重启"; exit 1; fi
+	/etc/init.d/sing-box restart
+	sleep 3
+	pidof sing-box >/dev/null && ok "已重启" || { err "启动失败"; exit 1; }
+	# tproxy 规则重启后仍在(iptables 不受影响), 但确认一下
+	iptables -t mangle -S PREROUTING 2>/dev/null | grep -q SB_TPROXY || "$TPROXY" start
+}
+
+cmd_verify() {
+	"$TPROXY" verify
+}
+
+# ─────────────────────────── 观测 ───────────────────────────
+
+cmd_log() {
+	case "${1:-live}" in
+		live)  say "实时日志 (Ctrl+C 退出)"; tail -f "$LOG" ;;
+		err)   grep -E "ERROR|WARN" "$LOG" | tail -"${2:-20}" ;;
+		*)     tail -"${1:-50}" "$LOG" ;;
+	esac
+}
+
+cmd_devices() {
+	printf "${C1}═══ LAN 设备流量统计 (来自劫持日志) ═══${C0}\n"
+	printf "  %-16s %-20s %s\n" "源IP" "连接数" "身份(dhcp)"
+	for ip in $(grep -oE 'connection from 192\.168\.8\.[0-9]+' "$LOG" | awk '{print $3}' | sort -u); do
+		n=$(grep -c "connection from $ip" "$LOG")
+		name=$(grep "$ip" /tmp/dhcp.leases 2>/dev/null | awk '{print $4}')
+		printf "  %-16s %-20s %s\n" "$ip" "$n" "${name:--}"
+	done
+}
+
+cmd_targets() {
+	# 出站目标分析: 走代理的/直连的/失败的
+	printf "${C1}═══ 出站目标分析 ═══${C0}\n"
+	printf "${C2}[PROXY]${C0} 走代理的目标:\n"
+	tail -500 "$LOG" | grep 'outbound/anytls' | grep -oE 'connection to [^ :]+' | sed 's/connection to //' | sort | uniq -c | sort -rn | head -10 | awk '{printf "   %5d  %s\n",$1,$2}'
+	printf "${C2}[DIRECT]${C0} 直连的目标:\n"
+	tail -500 "$LOG" | grep 'outbound/direct' | grep -oE 'connection to [^ :]+' | sed 's/connection to //' | sort | uniq -c | sort -rn | head -10 | awk '{printf "   %5d  %s\n",$1,$2}'
+	printf "${C4}[FAILED]${C0} 失败的目标(潜在漏网!):\n"
+	tail -500 "$LOG" | grep 'ERROR' | grep -oE 'connection to [^ :]+' | sed 's/connection to //' | sort | uniq -c | sort -rn | head -10 | awk '{printf "   %5d  %s\n",$1,$2}'
+}
+
+# ─────────────────────────── 排障 SOP ───────────────────────────
+
+cmd_trace() {
+	# 单目标追踪: 该域名/IP 现在走哪条路
+	T="${1:?用法: sb trace <域名或IP>}"
+	say "追踪 $T 的分流决策"
+	# 1. DNS 层: 查询会拿到什么
+	ip=$(dig +short +time=3 +tries=1 "$T" @127.0.0.1 2>/dev/null | tail -1)
+	case "$ip" in
+		198.18.*) printf "  DNS: ${C2}fakeip %s${C0} → 将走 sing-box 代理链\n" "$ip" ;;
+		"")       printf "  DNS: ${C4}解析失败${C0}\n" ;;
+		*)        printf "  DNS: 真实IP %s\n" "$ip" ;;
+	esac
+	# 2. 实际发一次连接看走向
+	r=$(curl -sS -m 10 -x http://127.0.0.1:7890 -o /dev/null -w '%{http_code}' "https://$T/" 2>/dev/null)
+	last=$(tail -20 "$LOG" | grep -E "connection to $T" | tail -1)
+	printf "  探测: HTTP %s\n" "${r:-超时}"
+	printf "  日志: %s\n" "${last:-无记录}"
+	echo "$last" | grep -q anytls && ok "→ 走代理" || { echo "$last" | grep -q direct && warn "→ 走直连" || printf "  (无明确记录)\n"; }
+}
+
+cmd_watch() {
+	# 抓某设备的流量 (排障神器)
+	SRC="${1:?用法: sb watch <源IP> [秒数]}"
+	DUR="${2:-30}"
+	say "抓取来自 $SRC 的流量 ${DUR}s (看 sing-box 如何决策)"
+	c="grep -E \"from $SRC\""
+	say "同时 tcpdump 物理层:"
+	timeout "$DUR" tcpdump -i br-lan -n -c 50 "src host $SRC and tcp[tcpflags] & tcp-syn != 0" 2>/dev/null | head -20
+	say "sing-box 层的新连接:"
+	timeout "$DUR" tail -f "$LOG" 2>/dev/null | grep --line-buffered "from $SRC" | head -20
+}
+
+cmd_sniff() {
+	# 抓包看域名: 某设备到底在连什么
+	SRC="${1:?用法: sb sniff <源IP> [秒数]}"
+	DUR="${2:-20}"
+	say "抓取 $SRC 的 TLS SNI / HTTP Host (${DUR}s)"
+	timeout "$DUR" tcpdump -i br-lan -n -A -s 300 "src host $SRC and tcp port 443" 2>/dev/null | grep -oE 'hostname|Host: [a-z0-9.-]+' | head -20
+	warn "注: 已被 fakeip 的连接看不到域名(本来就没有), 此法适用于直连IP的场景"
+}
+
+# ─────────────────────────── 规则补漏 ───────────────────────────
+
+cmd_add_rule() {
+	# 一键补一个 geoip/geosite 规则集 (用 jq 原子改配置, 不用脆弱的 sed)
+	NAME="${1:?用法: sb add-rule <规则名>  例: sb add-rule geoip-twitter}"
+	TYPE="${NAME%%-*}"    # geoip 或 geosite
+	TAG="$NAME"
+	case "$TYPE" in
+		geoip|geosite) OB="PROXY" ;;
+		*) err "规则名必须以 geoip- 或 geosite- 开头"; exit 1 ;;
+	esac
+	say "添加规则集 $NAME → $OB"
+	# 1. 下载 srs (若已存在则跳过)
+	if [ ! -f "$RULES_DIR/$NAME.srs" ]; then
+		wget -q -O "$RULES_DIR/$NAME.srs" "$MIRROR/$TYPE/${NAME#*-}.srs" 2>/dev/null
+		[ -s "$RULES_DIR/$NAME.srs" ] || { err "下载失败: $MIRROR/$TYPE/${NAME#*-}.srs"; rm -f "$RULES_DIR/$NAME.srs"; exit 1; }
+	fi
+	ok "规则文件 $(ls -la $RULES_DIR/$NAME.srs | awk '{print $5}') bytes"
+	# 2. jq 原子修改: rule_set 追加 + 路由规则插在 geosite-cn 前
+	#    (插入位置保证 IP 类规则优先于域名类, 且不被 cn 抢先)
+	cp "$CONF" "$CONF.bak"
+	jq --arg tag "$TAG" --arg path "$RULES_DIR/$NAME.srs" --arg ob "$OB" '
+	  def ins_rule: .route.rules as $rs |
+	    ($rs | map(.rule_set == "geosite-cn") | index(true)) as $i |
+	    (if $i == null then ($rs|length) else $i end) as $pos |
+	    .route.rules = ($rs[0:$pos] + [{rule_set:$tag, outbound:$ob}] + $rs[$pos:]);
+	  ins_rule |
+	  if (.route.rule_set | map(.tag) | index($tag)) == null
+	  then .route.rule_set += [{type:"local", tag:$tag, format:"binary", path:$path}]
+	  else . end
+	' "$CONF" > "$CONF.new" 2>/dev/null
+	if [ -s "$CONF.new" ] && jq empty "$CONF.new" 2>/dev/null; then
+		mv "$CONF.new" "$CONF"
+		ok "配置已更新 (rule_set + 路由规则)"
+	else
+		rm -f "$CONF.new"; mv "$CONF.bak" "$CONF"
+		err "jq 修改失败, 已回滚到原配置"; exit 1
+	fi
+	rm -f "$CONF.bak"
+	# 3. 校验 + 重启
+	if "$SB_BIN" check -c "$CONF" 2>&1; then
+		/etc/init.d/sing-box restart
+		sleep 3
+		pidof sing-box >/dev/null && ok "$NAME 已生效" || { err "重启失败"; exit 1; }
+	else
+		err "sing-box check 失败! 已保留 $CONF.bak 可回滚"
+		exit 1
+	fi
+}
+
+cmd_del_rule() {
+	NAME="${1:?用法: sb del-rule <规则名>}"
+	say "移除规则集 $NAME"
+	cp "$CONF" "$CONF.bak"
+	jq --arg tag "$NAME" '
+	  .route.rules |= map(select(.rule_set != $tag)) |
+	  .route.rule_set |= map(select(.tag != $tag))
+	' "$CONF" > "$CONF.new" 2>/dev/null
+	if [ -s "$CONF.new" ] && jq empty "$CONF.new" 2>/dev/null; then
+		mv "$CONF.new" "$CONF"
+	else
+		rm -f "$CONF.new"; mv "$CONF.bak" "$CONF"
+		err "jq 修改失败, 已回滚"; exit 1
+	fi
+	rm -f "$CONF.bak"
+	"$SB_BIN" check -c "$CONF" 2>&1 && /etc/init.d/sing-box restart && ok "已移除" || err "校验失败"
+}
+
+cmd_bypass() {
+	# 临时放行某目标 (不进代理, 排查用)
+	case "${1:-}" in
+		add)  NET="${2:?用法: sb bypass add <CIDR/IP>}"; echo "$NET" >> "$BASE/bypass_extra"; "$TPROXY" start; ok "已放行 $NET" ;;
+		del)  NET="${2:?用法: sb bypass del <CIDR/IP>}"; sed -i "\|^$NET$|d" "$BASE/bypass_extra"; "$TPROXY" start; ok "已移除 $NET" ;;
+		list) cat "$BASE/bypass_extra" 2>/dev/null || echo "(空)" ;;
+		*)    echo "用法: sb bypass add|del|list <CIDR>" ;;
+	esac
+}
+
+cmd_rules() {
+	printf "${C1}═══ 当前规则集 ═══${C0}\n"
+	ls -la "$RULES_DIR"/*.srs 2>/dev/null | awk '{printf "  %8d  %s\n", $5, $9}'
+	printf "\n${C1}═══ 路由规则(配置序) ═══${C0}\n"
+	grep -E '"rule_set"|"outbound"|"final"|"action"' "$CONF" | head -40 | sed 's/^[[:space:]]*//;s/"//g' | paste - - 2>/dev/null | sed 's/^/  /' || grep -E 'rule_set|outbound|final' "$CONF" | sed 's/^[[:space:]]*//;s/^/  /'
+}
+
+# ─────────────────────────── 规则集更新 ───────────────────────────
+
+cmd_update_rules() {
+	say "更新全部规则集 (从 $MIRROR)"
+	cd "$RULES_DIR" || exit 1
+	for f in *.srs; do
+		name="${f%.srs}"
+		type="${name%%-*}"
+		key="${name#*-}"
+		wget -q -O "$f.new" "$MIRROR/$type/$key.srs" 2>/dev/null
+		if [ -s "$f.new" ] && head -c 4 "$f.new" | grep -q "SRS"; then
+			mv "$f.new" "$f"
+			ok "$f"
+		else
+			rm -f "$f.new"
+			warn "$f 下载失败, 保留旧版"
+		fi
+	done
+	/etc/init.d/sing-box restart && ok "已重启生效"
+}
+
+# ─────────────────────────── Help ───────────────────────────
+
+help_usage() {
+	cat <<'EOF'
+sb — sing-box 透明代理运维工具 (GL-MT3600BE)
+
+用法: sb <命令> [参数]
+
+【状态查看】
+  status              总览: 进程/规则/分流统计/内存负载
+  rules               当前规则集与路由规则列表
+  devices             LAN 各设备连接统计(谁在用代理)
+  targets             出站目标分析: 代理/直连/失败(漏网嫌疑) 三类排行
+  log [N|live|err]    日志: 默认实时; sb log 100 看最近100行; sb log err 看错误
+
+【启停与回滚】
+  on                  启动 (sing-box + TPROXY 规则)
+  off                 回滚 (移除规则, 全屋恢复直连; sing-box 保留运行)
+  restart             重启 sing-box (先校验配置, 坏配置拒绝重启)
+  verify              自证回滚干净 (规则/链/策略路由/路由表 全为0)
+
+【排查漏网】 ← 发现"某网站/App连不上"时从这里开始
+  trace <域名|IP>     单目标追踪: DNS给什么/探测结果/实际走哪条出站
+  watch <源IP> [秒]   抓某设备流量: tcpdump SYN + sing-box 决策日志
+  sniff <源IP> [秒]   抓某设备 TLS SNI (看它在连什么域名)
+  bypass add|del|list <CIDR>   临时放行某目标(不过代理, 排查对照用)
+
+【补规则】
+  add-rule <名称>     一键补规则集并生效, 例:
+                       sb add-rule geoip-twitter
+                       sb add-rule geosite-openai
+  del-rule <名称>     移除某规则集
+  update-rules        更新全部规则集(geosite/geoip 最新版)并重启
+
+【其他】
+  help [主题]         usage | debug | recipe | all
+EOF
+}
+
+help_debug() {
+	cat <<'EOF'
+══════════════════════════════════════════════════════
+ 排障 SOP — "某网站/App 连不上" 的标准处理流程
+══════════════════════════════════════════════════════
+写给未来的 Agent: 按顺序执行, 不要跳步。
+
+【第0步·心法】
+  本方案的分流语义(策略A):
+    geosite-cn / geoip-cn → direct (直连)
+    境外域名(geolocation-!cn) → old
+    geoip-telegram → old; openai/anthropic/cursor → sg; youtube/yifan/pipecdn → hk2
+    漏网 → final: direct (直连!)
+  所以 "连不上" 的两大根因:
+    ① 目标是被墙服务, 但没命中任何 PROXY 规则 → 落到 final:direct → 被墙
+    ② 目标命中了 direct 规则但实际需要代理 (规则误伤)
+
+【第1步·定位失败连接】
+  sb targets                 # 看 [FAILED] 排行, 找到连不上的目标
+  sb log err 30              # 最近30条错误
+  记下目标的域名或IP。
+
+【第2步·看它现在走哪条路】
+  sb trace <域名或IP>
+  输出三行: DNS给什么(fakeip=会走代理链) / HTTP探测 / 日志里的实际出站
+  → 走 anytls[PROXY] 却还连不上 = 节点问题, 与规则无关
+  → 走 direct 且超时 = 漏网! 进入第3步
+
+【第3步·判断漏网类型, 对症下药】
+  类型A: 目标是域名, 但域名不在 geolocation-!cn 列表里
+    修法: sb add-rule geosite-<名>   (如 geosite-openai)
+    或确认该域名确实该走代理, 也可加自定义 domain_suffix
+  类型B: App 直接连 IP, 根本没有域名 (Telegram/游戏/P2P 常见)
+    修法: sb add-rule geoip-<名>    (如 geoip-twitter)
+  类型C: 规则误伤 (命中direct但需要代理)
+    sb rules 查规则序; sb trace 验证; sb del-rule 移除误伤规则
+  类型D: 想临时对照测试 (直连是否真的不通)
+    sb bypass add <IP>  → 对照测完 sb bypass del <IP>
+
+【第4步·验证】
+  sb trace <目标>    → 应显示 "→ 走代理"
+  实际设备上重试该网站/App
+
+【第5步·收尾】
+  sb status 确认整体健康; 如需记录: 规则文件在 /etc/sing-box/rules/
+
+══════════════════════════════════════════════════════
+ 抓流量方法 (当不知道设备在连什么时)
+══════════════════════════════════════════════════════
+  # 1. 找设备IP
+  cat /tmp/dhcp.leases              # MAC/IP/主机名
+
+  # 2. 看它的连接去哪 (sing-box 视角, 最常用)
+  sb watch 192.168.8.203 30         # 30秒内该设备的全部连接决策
+
+  # 3. 看它在连什么域名 (SNI 抓取, 适用于直连IP场景)
+  sb sniff 192.168.8.203 20
+
+  # 4. 原始抓包 (tcpdump, 万能但难读)
+  tcpdump -i br-lan -n src host 192.168.8.203 and port 443 -c 100
+
+  # 5. 只看 sing-box 日志里某设备的记录
+  grep "from 192.168.8.203" /var/log/sing-box.log | tail -50
+
+══════════════════════════════════════════════════════
+ 紧急情况
+══════════════════════════════════════════════════════
+  全屋断网:        sb off            (一条命令恢复直连)
+  sb off 后仍异常: sb verify         (必须 PASS)
+  仍不行:          重启路由器 (规则全在内存, 重启后 S99 自动重放;
+                    若自启有问题, 重启后处于"只跑sing-box不劫持"安全态)
+  绝对禁止: 只停 sing-box 而留 TPROXY 规则 (会黑洞) — 用 sb off, 不要单独 stop
+══════════════════════════════════════════════════════
+EOF
+}
+
+help_recipe() {
+	cat <<'EOF'
+══════════════════════════════════════════════════════
+ 常见任务速查
+══════════════════════════════════════════════════════
+# 发现某境外网站打不开
+  sb targets && sb trace example.com
+  sb add-rule geosite-xxx        # 补规则
+  sb add-rule geoip-xxx          # 若是IP直连类
+
+# 换代理节点 (重要: 必须同步白名单防环路!)
+  vi /etc/sing-box/config.json            # 改 PROXY outbound
+  echo "新节点IP" >> /etc/sing-box/proxy_ips   # 防环路!
+  sb restart
+
+# 看家人哪个设备在用/用量
+  sb devices
+
+# 规则集过期, 更新
+  sb update-rules
+
+# 临时让某 IP 不走代理 (排查)
+  sb bypass add 1.2.3.4
+  sb bypass del 1.2.3.4
+
+# Mac 侧配置镜像 (改配置建议先改 Mac 再推)
+  # 配置: <你的管理机>/home-router-proxy-kit/files/sing-box.json (安装时编辑好的那份)
+  # 文档: home-router-proxy-kit/docs/ (架构/运维/排障/事故史)
+  scp files/sing-box.json root@<路由器IP>:/etc/sing-box/config.json
+  ssh root@<路由器IP> sb restart
+══════════════════════════════════════════════════════
+EOF
+}
+
+cmd_help() {
+	case "${1:-usage}" in
+		usage)  help_usage ;;
+		debug)  help_debug ;;
+		recipe) help_recipe ;;
+		all)    help_usage; echo; help_debug; echo; help_recipe ;;
+		*)      echo "未知主题: $1 (可选: usage|debug|recipe|all)"; help_usage ;;
+	esac
+}
+
+# ─────────────────────────── 入口 ───────────────────────────
+
+main() {
+	[ $# -eq 0 ] && { help_usage; exit 0; }
+	CMD="$1"; shift
+	case "$CMD" in
+		status)        cmd_status ;;
+		on)            cmd_on ;;
+		off)           cmd_off ;;
+		restart)       cmd_restart ;;
+		verify)        cmd_verify ;;
+		log)           cmd_log "$@" ;;
+		devices)       cmd_devices ;;
+		targets)       cmd_targets ;;
+		trace)         cmd_trace "$@" ;;
+		watch)         cmd_watch "$@" ;;
+		sniff)         cmd_sniff "$@" ;;
+		bypass)        cmd_bypass "$@" ;;
+		rules)         cmd_rules ;;
+		add-rule)      cmd_add_rule "$@" ;;
+		del-rule)      cmd_del_rule "$@" ;;
+		update-rules)  cmd_update_rules ;;
+		help)          cmd_help "$@" ;;
+		*)             err "未知命令: $CMD"; echo; help_usage; exit 1 ;;
+	esac
+}
+
+main "$@"

@@ -1,0 +1,2 @@
+# 二进制规则集, 禁止 git 做无意义的 diff/merge
+files/rules/*.srs binary

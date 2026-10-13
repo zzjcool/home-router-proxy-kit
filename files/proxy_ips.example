@@ -1,0 +1,24 @@
+# 代理服务器 IP 白名单 —— 这些目标必须直连, 否则流量会成环
+#
+# 为什么需要:
+#   TPROXY 规则会把 LAN 转发的流量全部塞进 sing-box。
+#   sing-box 自己连代理服务器时, 如果那个连接也被 TPROXY 抓走, 就成了死循环。
+#   所以代理服务器的 IP 必须在 sb-tproxy 里被 RETURN 放行。
+#
+# 格式: 每行一个 IP (或 CIDR), # 开头为注释
+#
+# 注意: 这里必须写 **IP**, 不能写域名 —— iptables 不吃域名。
+#       但如果配置里 outbound 写的是域名, 且该域名解析走了直连 DNS, 通常也能工作;
+#       为了稳, 建议在 sing-box.json 里直接写 IP, 并把 IP 列在这里。
+
+# relay.example.com
+203.0.113.10
+
+# hk2.example.com
+203.0.113.20
+
+# hk.example.com
+203.0.113.30
+
+# sg.example.com
+203.0.113.40

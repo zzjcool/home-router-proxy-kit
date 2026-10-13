@@ -1,0 +1,21 @@
+[1;36m═══ sing-box 透明代理状态 ═══[0m
+[1;32m ✓[0m sing-box 运行中 (PID 27939, RSS 81MB)
+[1;32m ✓[0m TPROXY 规则已挂载 (命中 157M 包)
+   代理范围: 整个 br-lan
+   出站分布(近期):       1 direct[direct] 
+[1;32m ✓[0m 近期日志无错误
+   内存可用: 64MB   负载: 0.40 0.36 0.29
+=== 端口监听 ===
+tcp        0      0 127.0.0.1:7890          0.0.0.0:*               LISTEN      
+tcp        0      0 :::7895                 :::*                    LISTEN      
+tcp        0      0 :::9090                 :::*                    LISTEN      
+=== 开机自启 ===
+lrwxrwxrwx    1 root     root            19 Sep 20 22:58 K05sb-tproxy -> ../init.d/sb-tproxy
+lrwxrwxrwx    1 root     root            18 Sep 20 22:58 K10sing-box -> ../init.d/sing-box
+lrwxrwxrwx    1 root     root            18 Sep 20 22:58 S95sing-box -> ../init.d/sing-box
+lrwxrwxrwx    1 root     root            19 Sep 20 22:58 S99sb-tproxy -> ../init.d/sb-tproxy
+=== cron ===
+0 * * * * /usr/bin/sb-log-trim.sh
+=== 内存 ===
+              total        used        free      shared  buff/cache   available
+Mem:         492824      367440       61444        6752       63940       66636

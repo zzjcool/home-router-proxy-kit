@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# sb-tproxy 服务 - 开机自动应用 TPROXY 规则
+#
+# 重要: 本服务只调用 sb-tproxy 脚本, 规则仅存在于内存。
+#       出问题时 stop / 重启路由器即可完全恢复。
+#
+# 上线策略: 默认 START=99 但在 /etc/sing-box/tproxy.src 不存在时才全量代理。
+#          灰度阶段建议先不要 enable, 手动 start 验证。
+
+START=99
+STOP=05
+USE_PROCD=1
+
+SB_TPROXY="/etc/sing-box/sb-tproxy"
+
+start_service() {
+	[ -x "$SB_TPROXY" ] || { echo "缺少 $SB_TPROXY"; return 1; }
+	# 等 WAN 就绪, 避免开机瞬间规则已挂但上不了网造成误判
+	sleep 8
+	if ! "$SB_TPROXY" start; then
+		echo "sb-tproxy 启动失败, 已回滚"
+		"$SB_TPROXY" stop
+		return 1
+	fi
+}
+
+stop_service() {
+	[ -x "$SB_TPROXY" ] && "$SB_TPROXY" stop
+}

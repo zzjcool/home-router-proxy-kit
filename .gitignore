@@ -1,0 +1,15 @@
+# Git 忽略规则 — 家庭路由器 sing-box 分流套件
+
+# ── 真实节点信息绝不入库（分享的是模板） ──
+# 部署时把 proxy_ips.example 改好后, 如在本地生成真实 proxy_ips, 不要提交:
+proxy_ips
+files/proxy_ips
+
+# 填好真实节点的配置（REPLACE_WITH_* 已替换的版本）
+# 若你在本仓库里直接编辑 files/sing-box.json 并填了真实密码, 提交前务必还原为模板
+*.local.json
+
+# ── 系统文件 ──
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,158 @@
+#!/bin/sh
+# sb-tproxy — sing-box 透明代理(TPROXY) 规则管理
+# 适配: GL.iNet GL-MT3600BE / OpenWrt 21.02 / fw3+iptables
+#
+# 用法: sb-tproxy start | stop | status | verify
+#
+# 状态模型
+#   /etc/sing-box/enabled   存在 = 应处于启用状态(fw3 reload / 开机时据此自动重放规则)
+#   /etc/sing-box/tproxy.src 灰度名单, 每行一个源 CIDR; 缺失或为空 = 代理整个 LAN
+#
+# 设计原则(每一条都是事故换来的)
+#   1. 只劫持 LAN 接口上的转发流量, 路由器自身流量完全不经过本链
+#      (不用 sing-box 的 tun auto_route —— 那个会插入 "from all lookup 2022"
+#       把 WAN 侧和本机流量一起劫持, 就是上次全屋断网的根因)
+#   2. DNS(53) 最先劫持, 且必须在私网旁路之前 —— 否则设备发给路由器的
+#      查询会直接落到 dnsmasq(污染上游), fakeip 分流完全失效
+#   3. 198.18.0.0/15 (fakeip 段) 绝不能进旁路表 —— fakeip 连接必须进
+#      sing-box 才能还原成域名再分流, 旁路了就是黑洞
+#   4. 回滚必须彻底且自证: stop 后逐一核对残留, 不干净就以非零退出
+#   5. 幂等: 反复 start/stop 不产生重复规则
+
+LAN_IF="${SB_LAN_IF:-br-lan}"
+TPROXY_PORT="${SB_TPROXY_PORT:-7895}"
+MARK="${SB_MARK:-1}"
+TABLE="${SB_TABLE:-100}"
+BASE="/etc/sing-box"
+SRC_FILE="$BASE/tproxy.src"
+PROXY_FILE="$BASE/proxy_ips"
+EXTRA_FILE="$BASE/bypass_extra"
+ENABLED_FILE="$BASE/enabled"
+
+# 注意: 198.18.0.0/15 (fakeip) 故意不在下面 —— 见设计原则 3
+BYPASS_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 \
+172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4"
+
+log() { echo "[sb-tproxy] $*"; }
+die() { echo "[sb-tproxy] 错误: $*" >&2; exit 1; }
+
+count_residue() {
+	_ipt=$(iptables -t mangle -S PREROUTING 2>/dev/null | grep -c -- "-j SB_TPROXY")
+	_chain=$(iptables -t mangle -S 2>/dev/null | grep -c "^:SB_TPROXY\|^-N SB_TPROXY")
+	_rule=$(ip rule show | grep -c "fwmark 0x$MARK lookup $TABLE")
+	_rt=$(ip route show table "$TABLE" 2>/dev/null | wc -l)
+	echo "$_ipt $_chain $_rule $_rt"
+}
+
+# 逐条解析 PREROUTING 里实际的挂载参数再删除
+# (灰度模式挂载带 -s, 无脑按固定参数删会静默失败 —— 上一版的真实 bug)
+detach_all() {
+	iptables -t mangle -S PREROUTING 2>/dev/null | grep -- "-j SB_TPROXY" | while read -r _line; do
+		_args=$(echo "$_line" | sed -e 's/^-A PREROUTING //' -e 's/ -j SB_TPROXY$//')
+		# shellcheck disable=SC2086
+		iptables -t mangle -D PREROUTING $_args -j SB_TPROXY 2>/dev/null
+	done
+}
+
+do_stop() {
+	detach_all
+	iptables -t mangle -F SB_TPROXY 2>/dev/null
+	if ! iptables -t mangle -X SB_TPROXY 2>/dev/null; then
+		if iptables -t mangle -S SB_TPROXY >/dev/null 2>&1; then
+			log "链仍被引用, 重试摘除"
+			detach_all
+			iptables -t mangle -F SB_TPROXY 2>/dev/null
+			iptables -t mangle -X SB_TPROXY 2>/dev/null
+		fi
+	fi
+	while ip rule del fwmark "$MARK" lookup "$TABLE" 2>/dev/null; do :; done
+	ip route flush table "$TABLE" 2>/dev/null
+	rm -f "$ENABLED_FILE"
+
+	set -- $(count_residue)
+	if [ "$1" != 0 ] || [ "$2" != 0 ] || [ "$3" != 0 ] || [ "$4" != 0 ]; then
+		echo "[sb-tproxy] 回滚不干净! 残留(规则 链 策略路由 路由表)= $1 $2 $3 $4" >&2
+		exit 1
+	fi
+	log "已停止, 残留核对通过 (规则/链/策略路由/路由表 均为 0)"
+}
+
+do_start() {
+	do_stop >/dev/null 2>&1 || true
+
+	ip rule add fwmark "$MARK" lookup "$TABLE" || die "添加策略路由失败"
+	ip route add local default dev lo table "$TABLE" || die "添加本地路由失败"
+
+	iptables -t mangle -N SB_TPROXY || die "创建链失败"
+
+	# 1) DNS 优先劫持 —— 必须在私网旁路之前(见设计原则 2)
+	iptables -t mangle -A SB_TPROXY -p udp --dport 53 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$MARK"
+	iptables -t mangle -A SB_TPROXY -p tcp --dport 53 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$MARK"
+
+	# 2) 私网/保留地址直连(不含 fakeip 段, 见设计原则 3)
+	for net in $BYPASS_V4; do
+		iptables -t mangle -A SB_TPROXY -d "$net" -j RETURN
+	done
+
+	# 3) 额外旁路(排查用, 每行一个 CIDR)
+	if [ -f "$EXTRA_FILE" ]; then
+		while read -r net; do
+			case "$net" in ''|\#*) continue;; esac
+			iptables -t mangle -A SB_TPROXY -d "$net" -j RETURN
+		done < "$EXTRA_FILE"
+	fi
+
+	# 4) 代理服务器本身必须直连, 否则流量成环
+	if [ -f "$PROXY_FILE" ]; then
+		while read -r ip; do
+			case "$ip" in ''|\#*) continue;; esac
+			iptables -t mangle -A SB_TPROXY -d "$ip" -j RETURN
+			iptables -t mangle -A SB_TPROXY -s "$ip" -j RETURN
+		done < "$PROXY_FILE"
+	fi
+
+	# 5) 其余全部交给 tproxy
+	iptables -t mangle -A SB_TPROXY -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$MARK"
+	iptables -t mangle -A SB_TPROXY -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$MARK"
+
+	# 挂载: 有灰度名单则按源逐条挂, 否则整接口
+	_n=0
+	if [ -s "$SRC_FILE" ]; then
+		while read -r src; do
+			case "$src" in ''|\#*) continue;; esac
+			iptables -t mangle -I PREROUTING 1 -s "$src" -i "$LAN_IF" -j SB_TPROXY
+			log "灰度: 代理 $src"
+			_n=$((_n+1))
+		done < "$SRC_FILE"
+	fi
+	if [ "$_n" = 0 ]; then
+		iptables -t mangle -I PREROUTING 1 -i "$LAN_IF" -j SB_TPROXY
+		log "已启动: 代理整个 $LAN_IF"
+	else
+		log "已启动: 灰度模式, 共 $_n 条源"
+	fi
+
+	touch "$ENABLED_FILE"
+}
+
+case "$1" in
+	start) do_start ;;
+	stop)  do_stop ;;
+	status)
+		if iptables -t mangle -S PREROUTING 2>/dev/null | grep -q -- "-j SB_TPROXY"; then
+			echo "状态: 运行中"
+			echo "--- 挂载规则 ---"; iptables -t mangle -S PREROUTING | grep SB_TPROXY
+			echo "--- 策略路由 ---"; ip rule show | grep "fwmark 0x$MARK"
+			echo "--- 链内规则(前6条) ---"; iptables -t mangle -S SB_TPROXY | head -6
+		else
+			echo "状态: 已停止"
+			set -- $(count_residue)
+			echo "残留核对: 规则=$1 链=$2 策略路由=$3 路由表=$4"
+		fi ;;
+	verify)
+		set -- $(count_residue)
+		echo "残留: mangle挂载=$1 链=$2 策略路由=$3 路由表条目=$4"
+		[ "$1" = 0 ] && [ "$2" = 0 ] && [ "$3" = 0 ] && [ "$4" = 0 ] \
+			&& echo "PASS: 环境干净" || { echo "FAIL: 有残留"; exit 1; } ;;
+	*) echo "用法: $0 {start|stop|status|verify}"; exit 1 ;;
+esac

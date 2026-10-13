@@ -1,0 +1,430 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true,
+    "output": "/var/log/sing-box.log"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "dns-proxy",
+        "server": "8.8.8.8",
+        "detour": "PROXY"
+      },
+      {
+        "type": "udp",
+        "tag": "dns-local",
+        "server": "223.5.5.5"
+      },
+      {
+        "type": "fakeip",
+        "tag": "dns-fake",
+        "inet4_range": "198.18.0.0/15"
+      }
+    ],
+    "rules": [
+      {
+        "domain_suffix": [
+          "argotunnel.com"
+        ],
+        "server": "dns-local"
+      },
+      {
+        "domain_suffix": [
+          ".ts.net"
+        ],
+        "server": "dns-local"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "server": "dns-local"
+      },
+      {
+        "rule_set": "geosite-geolocation-!cn",
+        "server": "dns-fake"
+      }
+    ],
+    "final": "dns-local",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tproxy",
+      "tag": "tproxy-in",
+      "listen": "::",
+      "listen_port": 7895
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "anytls",
+      "tag": "hk-direct",
+      "server": "198.51.100.10",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "hk.example.com"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "PROXY",
+      "server": "relay.example.com",
+      "server_port": 30001,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "idle_session_check_interval": "30s",
+      "idle_session_timeout": "30s",
+      "min_idle_session": 5,
+      "tls": {
+        "enabled": true,
+        "server_name": "relay.example.com"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "sg-direct",
+      "server": "sg.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "sg.example.com"
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "anytls",
+      "tag": "hk2-direct",
+      "server": "hk2.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "hk2.example.com"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "nj",
+      "server": "relay.example.com",
+      "server_port": 40000,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "idle_session_check_interval": "30s",
+      "idle_session_timeout": "30s",
+      "min_idle_session": 5,
+      "tls": {
+        "enabled": true,
+        "server_name": "relay.example.com"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "hk-via-nj",
+      "server": "198.51.100.10",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "hk.example.com"
+      },
+      "detour": "nj"
+    },
+    {
+      "type": "anytls",
+      "tag": "hk2-via-nj",
+      "server": "hk2.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "hk2.example.com"
+      },
+      "detour": "nj"
+    },
+    {
+      "type": "anytls",
+      "tag": "sg-via-nj",
+      "server": "sg.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "sg.example.com"
+      },
+      "detour": "nj"
+    },
+    {
+      "type": "anytls",
+      "tag": "sg-via-hk",
+      "server": "sg.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "sg.example.com"
+      },
+      "detour": "hk-direct"
+    },
+    {
+      "type": "anytls",
+      "tag": "sg-via-nj-hk",
+      "server": "sg.example.com",
+      "server_port": 443,
+      "password": "REPLACE_WITH_YOUR_PASSWORD",
+      "domain_resolver": "dns-local",
+      "tls": {
+        "enabled": true,
+        "server_name": "sg.example.com"
+      },
+      "detour": "hk-via-nj"
+    },
+    {
+      "type": "urltest",
+      "tag": "hk",
+      "outbounds": [
+        "hk-direct",
+        "hk-via-nj"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "2m",
+      "tolerance": 50
+    },
+    {
+      "type": "urltest",
+      "tag": "hk2",
+      "outbounds": [
+        "hk2-direct",
+        "hk2-via-nj"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "2m",
+      "tolerance": 50
+    },
+    {
+      "type": "urltest",
+      "tag": "sg",
+      "outbounds": [
+        "sg-direct",
+        "sg-via-nj",
+        "sg-via-hk",
+        "sg-via-nj-hk"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "2m",
+      "tolerance": 50
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "port": 53,
+        "action": "hijack-dns"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geosite-twitter",
+        "outbound": "hk"
+      },
+      {
+        "rule_set": "geosite-instagram",
+        "outbound": "hk"
+      },
+      {
+        "rule_set": "geosite-youtube",
+        "outbound": "hk2"
+      },
+      {
+        "rule_set": "geosite-google",
+        "outbound": "hk"
+      },
+      {
+        "rule_set": "geoip-telegram",
+        "outbound": "hk"
+      },
+      {
+        "rule_set": "geosite-openai",
+        "outbound": "sg"
+      },
+      {
+        "rule_set": "geosite-anthropic",
+        "outbound": "sg"
+      },
+      {
+        "domain_suffix": [
+          "yifan.tv",
+          "pipecdn.vip"
+        ],
+        "outbound": "hk2"
+      },
+      {
+        "domain_suffix": [
+          "cursor.com",
+          "cursor.sh",
+          "cursorapi.com",
+          "anysphere.inc",
+          "sentry-cdn.com"
+        ],
+        "outbound": "sg"
+      },
+      {
+        "domain_suffix": [
+          ".ts.net"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "domain_suffix": [
+          "your-server.example.com"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geosite-cn",
+        "outbound": "direct"
+      },
+      {
+        "rule_set": "geosite-geolocation-!cn",
+        "outbound": "hk"
+      },
+      {
+        "rule_set": "geoip-cn",
+        "outbound": "direct"
+      },
+      {
+        "ip_cidr": [
+          "::/0"
+        ],
+        "action": "reject"
+      },
+      {
+        "ip_cidr": [
+          "173.245.48.0/20",
+          "103.21.244.0/22",
+          "103.22.200.0/22",
+          "103.31.4.0/22",
+          "141.101.64.0/18",
+          "108.162.192.0/18",
+          "190.93.240.0/20",
+          "188.114.96.0/20",
+          "197.234.240.0/22",
+          "198.41.128.0/17",
+          "162.158.0.0/15",
+          "104.16.0.0/13",
+          "104.24.0.0/14",
+          "172.64.0.0/13",
+          "131.0.72.0/22"
+        ],
+        "outbound": "hk"
+      }
+    ],
+    "final": "direct",
+    "auto_detect_interface": true,
+    "default_domain_resolver": {
+      "server": "dns-local"
+    },
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "geosite-cn",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-geolocation-!cn",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-geolocation-!cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geoip-cn",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geoip-cn.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geoip-telegram",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geoip-telegram.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-youtube",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-youtube.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-twitter",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-twitter.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-instagram",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-instagram.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-google",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-google.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-openai",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-openai.srs"
+      },
+      {
+        "type": "local",
+        "tag": "geosite-anthropic",
+        "format": "binary",
+        "path": "/etc/sing-box/rules/geosite-anthropic.srs"
+      }
+    ]
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "/tmp/sing-box-cache.db",
+      "store_fakeip": true
+    },
+    "clash_api": {
+      "external_controller": "0.0.0.0:9090",
+      "secret": "REPLACE_WITH_CLASH_SECRET",
+      "default_mode": "Rule"
+    }
+  }
+}
