@@ -36,7 +36,8 @@ home-router-proxy-kit/
 │   ├── DEPLOY.md              ← 部署手册（从零到全量, 灰度可回滚）
 │   ├── OPERATIONS.md          ← 日常运维（sb 命令/换节点/规则更新/设备分析）
 │   ├── TROUBLESHOOTING.md     ← 排障 SOP（"某网站连不上"标准流程）
-│   └── POSTMORTEMS.md         ← 事故史（每条教训都固化进了脚本设计）
+│   ├── POSTMORTEMS.md         ← 事故史（每条教训都固化进了脚本设计）
+│   └── COMPARISON.md         ← 选型对比（sing-box vs 其他方案, 何时不该用本套件）
 ├── files/                     ← 部署到路由器的文件
 │   ├── install.sh             ← 一键安装（默认不启动任何东西; 自动装 sb CLI+cron+补全）
 │   ├── sing-box.json           ← 基线配置模板（单出口, 新部署从这里开始）
@@ -94,6 +95,8 @@ home-router-proxy-kit/
 
 ## 与常见方案的区别
 
+选型对比（sing-box vs mihomo/xray vs OpenClash/Nikki vs TUN、何时不该用本套件）
+详见 **`docs/COMPARISON.md`**。速览：
 | 方案 | 状态 |
 |---|---|
 | 本套件（sing-box + iptables TPROXY） | fw3/iptables 机器上的生产验证方案 |
